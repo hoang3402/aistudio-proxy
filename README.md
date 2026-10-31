@@ -39,8 +39,8 @@ Image nền `localhost/aistudio-proxy:044c3db` **không nằm trong repo** (6 GB
 git clone https://github.com/CJackHwang/AIstudioProxyAPI.git
 cd AIstudioProxyAPI && git checkout 044c3db
 podman build -f docker/Dockerfile -t localhost/aistudio-proxy:044c3db .   # context là gốc repo upstream
-cd - && podman build -t localhost/aistudio-proxy:044c3db-fix2 .            # image vá của repo này
-podman save localhost/aistudio-proxy:044c3db-fix2 | sudo k3s ctr images import -
+cd - && podman build -t localhost/aistudio-proxy:044c3db-fix3 .            # image vá của repo này
+podman save localhost/aistudio-proxy:044c3db-fix3 | sudo k3s ctr images import -
 ```
 
 ## Bí mật (không có trong repo)
@@ -83,7 +83,7 @@ Header trả về: `X-Audio-Seconds`, `X-Audio-Sample-Rate`.
 
 ### Cách hoạt động (đã đo thật, 10/2026)
 
-- Một trang riêng trong **context riêng** của cùng trình duyệt (tách localStorage khỏi trang chat), mở lười ở yêu cầu đầu rồi giữ mở, có khoá riêng nên không chặn hàng đợi chat.
+- Một trang riêng trong **context riêng** của cùng trình duyệt (tách localStorage khỏi trang chat), mở lười ở yêu cầu đầu rồi giữ mở (yêu cầu đầu tốn thêm ~15 giây). Trang đang mở nhưng rảnh thì không ảnh hưởng chat.
 - Audio không lấy từ thẻ `<audio>` mà bắt phản hồi RPC `MakerSuiteService/GenerateContent`: JSON lồng nhau, mỗi đoạn là `["audio/l16; rate=24000; channels=1", "<base64>"]`; ghép các đoạn (khoảng 80 đoạn cho câu ngắn) thành PCM little-endian.
 - Bấm Run phải giống người thật (di chuột tới nút rồi nhấn thả, sau vài giây trang mở): bấm thẳng thì Google trả 403 "The caller does not have permission" (BotGuard). Đo được 10 trên 11 lần đầu thành công, nên có thử lại tối đa 3 lần bấm.
 - Sau mỗi kết quả nút Run bị khoá (`aria-disabled`); Pause không mở lại được. Phải bấm **New chat** để sang hộp thoại mới trước lần đọc kế.
@@ -98,6 +98,7 @@ Header trả về: `X-Audio-Seconds`, `X-Audio-Sample-Rate`.
 ### Giới hạn
 
 - Mỗi lần chỉ một yêu cầu (một trang): yêu cầu khác xếp hàng chờ.
+- Đọc và chat dùng chung `processing_lock`, nên **không chạy chồng nhau** (đọc 3.600 ký tự giữ khoá khoảng 1 phút). Bản `fix2` không có khoá này: đo thật, chat chạy chồng với một lần đọc bị hỏng việc lấy lại nội dung trả lời và làm hỏng luôn yêu cầu chat kế tiếp.
 - Bộ lọc ngôn ngữ của danh sách giọng không có tiếng Việt; văn bản tiếng Việt vẫn được đọc, chất lượng cần nghe thử.
 - Phụ thuộc giao diện trang Generate speech (nhãn nút "New chat", "Create new dialog", ô `Speech block text`, panel "Speaker settings"): Google đổi giao diện thì phải sửa selector trong `browser_utils/speech.py`.
 - Chưa chọn được model khác và chưa có chế độ nhiều người nói.

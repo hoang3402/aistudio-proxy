@@ -5,6 +5,10 @@ Theo khuôn của OpenAI (model, input, voice, response_format) để client Ope
 - `voice` là tên giọng của AI Studio (vd "Lumi"); tên giọng OpenAI (alloy, echo, nova…) hoặc để trống thì dùng giọng mặc định.
 - `model` hiện bị bỏ qua: trang dùng model đang hiện trong Run settings (gemini-3.8-flash-tts).
 - `speed` bị bỏ qua.
+
+Đọc và chat KHÔNG được chạy chồng nhau: đo thật, một yêu cầu chat chạy cùng lúc với một lần đọc bị mất khả năng lấy lại nội dung trả lời
+(nút Edit / More options hết hạn) và làm hỏng luôn yêu cầu chat kế tiếp. Nên route lấy cùng `processing_lock` với hàng đợi chat
+(queue_worker.py giữ khoá này khi xử lý từng yêu cầu chat): chat chờ lúc đang đọc và ngược lại.
 """
 
 import logging
@@ -18,6 +22,7 @@ from pydantic import BaseModel
 from browser_utils.speech import DEFAULT_VOICE, SpeechError, pcm_to_wav, speech_service
 
 from ..dependencies import get_logger, get_page_instance, get_server_state
+from ..server_state import state
 
 router = APIRouter()
 
@@ -52,7 +57,8 @@ async def create_speech(
     if voice and voice.lower() in OPENAI_VOICES:
         voice = None
     try:
-        pcm, rate = await speech_service.synthesize(page, request.input, voice or DEFAULT_VOICE)
+        async with state.processing_lock:
+            pcm, rate = await speech_service.synthesize(page, request.input, voice or DEFAULT_VOICE)
     except SpeechError as exc:
         logger.warning(f"[Speech] {exc.status}: {exc}")
         return _error(exc.status, str(exc), "speech_failed")
