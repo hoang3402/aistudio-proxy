@@ -1,0 +1,27 @@
+--- a/api_utils/app.py
++++ b/api_utils/app.py
+@@ -189,6 +189,14 @@
+ 
+     state.should_exit = True
+ 
++    # Trang Generate speech (browser_utils/speech.py) có context riêng: đóng trước khi trình duyệt tắt
++    try:
++        from browser_utils.speech import speech_service
++
++        await speech_service.close()
++    except Exception as e:
++        logger.debug(f"Failed to close speech page: {e}")
++
+     if state.STREAM_PROCESS:
+         try:
+             state.STREAM_PROCESS.terminate()
+@@ -447,6 +455,9 @@
+ 
+     app.include_router(server_router)
+     app.include_router(helper_router)
++    from .routers.audio import router as audio_router
++
++    app.include_router(audio_router)
+     app.get("/api/keys")(get_api_keys)
+     app.post("/api/keys")(add_api_key)
+     app.post("/api/keys/test")(test_api_key)

@@ -5,9 +5,10 @@
 #   - click thật vào ô nhập trước khi gửi, nếu không Google trả "The caller does not have permission"
 #   - selector nút Run và ô stop sequence theo giao diện mới
 #   - bỏ qua temperature/top_p khi model không còn thanh trượt (Gemini 3.x)
+#   - (fix2) POST /v1/audio/speech: đọc văn bản bằng trang Generate speech (browser_utils/speech.py, api_utils/routers/audio.py)
 #
-# Build: podman build -t localhost/aistudio-proxy:044c3db-fix1 ~/aistudio-proxy
-# Nạp vào k3s: podman save localhost/aistudio-proxy:044c3db-fix1 | sudo k3s ctr images import -
+# Build: podman build -t localhost/aistudio-proxy:044c3db-fix2 ~/aistudio-proxy
+# Nạp vào k3s: podman save localhost/aistudio-proxy:044c3db-fix2 | sudo k3s ctr images import -
 FROM localhost/aistudio-proxy:044c3db
 
 COPY --chown=appuser:appgroup src/ /app/
