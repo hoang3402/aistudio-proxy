@@ -9,9 +9,15 @@ Theo khuôn của OpenAI (model, input, voice, response_format) để client Ope
 Đọc và chat KHÔNG được chạy chồng nhau: đo thật, một yêu cầu chat chạy cùng lúc với một lần đọc bị mất khả năng lấy lại nội dung trả lời
 (nút Edit / More options hết hạn) và làm hỏng luôn yêu cầu chat kế tiếp. Nên route lấy cùng `processing_lock` với hàng đợi chat
 (queue_worker.py giữ khoá này khi xử lý từng yêu cầu chat): chat chờ lúc đang đọc và ngược lại.
+
+Khoá còn được giữ thêm SPEECH_SETTLE_SECONDS (mặc định 15) sau một lần đọc thành công, dù WAV đã trả về ngay. Đo thật: lượt chat ĐẦU TIÊN
+sau khi pod khởi động (phải chọn model) mà chạy ngay lúc đọc vừa xong thì Google không trả lời (khối câu trả lời hiện ra nhưng chữ không
+bao giờ tới, 500 sau ~90 giây); chạy sau đó 15 giây hoặc khi chat đã chạy trước đó thì ổn. Chưa rõ cơ chế, khoảng lặng này là giảm thiểu.
 """
 
+import asyncio
 import logging
+import os
 from typing import Optional
 
 from fastapi import Depends
@@ -25,6 +31,9 @@ from ..dependencies import get_logger, get_page_instance, get_server_state
 from ..server_state import state
 
 router = APIRouter()
+
+# Giây giữ khoá sau một lần đọc thành công (0 = nhả ngay)
+SETTLE_SECONDS = float(os.environ.get("SPEECH_SETTLE_SECONDS", "15"))
 
 OPENAI_VOICES = {"alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"}
 
@@ -56,12 +65,19 @@ async def create_speech(
     voice = request.voice.strip() if request.voice else None
     if voice and voice.lower() in OPENAI_VOICES:
         voice = None
+    await state.processing_lock.acquire()
+    hold = 0.0
     try:
-        async with state.processing_lock:
-            pcm, rate = await speech_service.synthesize(page, request.input, voice or DEFAULT_VOICE)
+        pcm, rate = await speech_service.synthesize(page, request.input, voice or DEFAULT_VOICE)
+        hold = SETTLE_SECONDS
     except SpeechError as exc:
         logger.warning(f"[Speech] {exc.status}: {exc}")
         return _error(exc.status, str(exc), "speech_failed")
+    finally:
+        if hold > 0:
+            asyncio.get_running_loop().call_later(hold, state.processing_lock.release)
+        else:
+            state.processing_lock.release()
     seconds = len(pcm) / (rate * 2)
     headers = {"X-Audio-Seconds": f"{seconds:.2f}", "X-Audio-Sample-Rate": str(rate)}
     if fmt == "pcm":

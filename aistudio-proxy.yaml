@@ -3,8 +3,8 @@
 # openai-compatibility tên "aistudio". Mọi request /v1/* cần header "Authorization: Bearer <auth/key.txt>".
 #
 # Triển khai:
-#   1. podman build -t localhost/aistudio-proxy:044c3db-fix3 ~/aistudio-proxy
-#   2. podman save localhost/aistudio-proxy:044c3db-fix3 | sudo k3s ctr images import -
+#   1. podman build -t localhost/aistudio-proxy:044c3db-fix4 ~/aistudio-proxy
+#   2. podman save localhost/aistudio-proxy:044c3db-fix4 | sudo k3s ctr images import -
 #   3. ~/aistudio-proxy/setup-secret.sh
 #   4. kubectl apply -f ~/aistudio-proxy/aistudio-proxy.yaml
 #
@@ -55,7 +55,7 @@ spec:
             initContainers:
                 # Chép cookie vào PVC lần đầu (không ghi đè bản đã làm mới), API key thì luôn lấy từ secret
                 - name: seed-auth
-                  image: localhost/aistudio-proxy:044c3db-fix3
+                  image: localhost/aistudio-proxy:044c3db-fix4
                   imagePullPolicy: Never
                   command:
                       - sh
@@ -72,7 +72,7 @@ spec:
                         readOnly: true
             containers:
                 - name: proxy
-                  image: localhost/aistudio-proxy:044c3db-fix3
+                  image: localhost/aistudio-proxy:044c3db-fix4
                   imagePullPolicy: Never
                   env:
                       # Proxy luồng tích hợp gửi lại request bằng Python và luôn bị Google trả 403: tắt
@@ -80,6 +80,9 @@ spec:
                         value: "0"
                       - name: SERVER_LOG_LEVEL
                         value: INFO
+                      # Giây giữ khoá chat sau một lần đọc thành công (xem README, mục Generate speech)
+                      - name: SPEECH_SETTLE_SECONDS
+                        value: "15"
                   ports:
                       - name: http
                         containerPort: 2048

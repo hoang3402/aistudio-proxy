@@ -39,8 +39,8 @@ Image nền `localhost/aistudio-proxy:044c3db` **không nằm trong repo** (6 GB
 git clone https://github.com/CJackHwang/AIstudioProxyAPI.git
 cd AIstudioProxyAPI && git checkout 044c3db
 podman build -f docker/Dockerfile -t localhost/aistudio-proxy:044c3db .   # context là gốc repo upstream
-cd - && podman build -t localhost/aistudio-proxy:044c3db-fix3 .            # image vá của repo này
-podman save localhost/aistudio-proxy:044c3db-fix3 | sudo k3s ctr images import -
+cd - && podman build -t localhost/aistudio-proxy:044c3db-fix4 .            # image vá của repo này
+podman save localhost/aistudio-proxy:044c3db-fix4 | sudo k3s ctr images import -
 ```
 
 ## Bí mật (không có trong repo)
@@ -99,6 +99,7 @@ Header trả về: `X-Audio-Seconds`, `X-Audio-Sample-Rate`.
 
 - Mỗi lần chỉ một yêu cầu (một trang): yêu cầu khác xếp hàng chờ.
 - Đọc và chat dùng chung `processing_lock`, nên **không chạy chồng nhau** (đọc 3.600 ký tự giữ khoá khoảng 1 phút). Bản `fix2` không có khoá này: đo thật, chat chạy chồng với một lần đọc bị hỏng việc lấy lại nội dung trả lời và làm hỏng luôn yêu cầu chat kế tiếp.
+- Khoá được giữ thêm `SPEECH_SETTLE_SECONDS` (mặc định 15, `0` = tắt) sau một lần đọc thành công; WAV vẫn trả về ngay. Lý do (đo thật, tái hiện 2/2): lượt chat **đầu tiên sau khi pod khởi động** (phải chọn model) mà chạy ngay lúc đọc vừa xong thì Google không trả lời (khối câu trả lời hiện ra, chữ không tới, 500 sau ~90 giây). Chạy chat đầu sau đó 15 giây, hoặc khi chat đã chạy trước đó, thì ổn. Chưa rõ cơ chế: đây là giảm thiểu, không phải nguyên nhân. Hệ quả: hai yêu cầu đọc liên tiếp cách nhau thêm tối đa 15 giây.
 - Bộ lọc ngôn ngữ của danh sách giọng không có tiếng Việt; văn bản tiếng Việt vẫn được đọc, chất lượng cần nghe thử.
 - Phụ thuộc giao diện trang Generate speech (nhãn nút "New chat", "Create new dialog", ô `Speech block text`, panel "Speaker settings"): Google đổi giao diện thì phải sửa selector trong `browser_utils/speech.py`.
 - Chưa chọn được model khác và chưa có chế độ nhiều người nói.

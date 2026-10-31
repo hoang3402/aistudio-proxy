@@ -7,9 +7,10 @@
 #   - bỏ qua temperature/top_p khi model không còn thanh trượt (Gemini 3.x)
 #   - (fix2) POST /v1/audio/speech: đọc văn bản bằng trang Generate speech (browser_utils/speech.py, api_utils/routers/audio.py)
 #   - (fix3) route speech lấy processing_lock của hàng đợi chat: đọc và chat không chạy chồng nhau
+#   - (fix4) giữ khoá thêm SPEECH_SETTLE_SECONDS (15) sau một lần đọc thành công
 #
-# Build: podman build -t localhost/aistudio-proxy:044c3db-fix3 ~/aistudio-proxy
-# Nạp vào k3s: podman save localhost/aistudio-proxy:044c3db-fix3 | sudo k3s ctr images import -
+# Build: podman build -t localhost/aistudio-proxy:044c3db-fix4 ~/aistudio-proxy
+# Nạp vào k3s: podman save localhost/aistudio-proxy:044c3db-fix4 | sudo k3s ctr images import -
 FROM localhost/aistudio-proxy:044c3db
 
 COPY --chown=appuser:appgroup src/ /app/
