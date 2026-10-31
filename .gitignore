@@ -1,0 +1,5 @@
+# Bí mật: cookie Google (storage state của Camoufox) và API key của proxy. KHÔNG BAO GIỜ commit.
+auth/
+__pycache__/
+*.pyc
+*.log

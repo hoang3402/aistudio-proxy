@@ -1,0 +1,147 @@
+# AIstudioProxyAPI: API kiểu OpenAI chạy qua giao diện web Google AI Studio (Camoufox headless).
+# Chỉ mở trong cluster (ClusterIP, không Ingress): CLIProxyAPI ở namespace cli gọi tới như một nhà cung cấp
+# openai-compatibility tên "aistudio". Mọi request /v1/* cần header "Authorization: Bearer <auth/key.txt>".
+#
+# Triển khai:
+#   1. podman build -t localhost/aistudio-proxy:044c3db-fix1 ~/aistudio-proxy
+#   2. podman save localhost/aistudio-proxy:044c3db-fix1 | sudo k3s ctr images import -
+#   3. ~/aistudio-proxy/setup-secret.sh
+#   4. kubectl apply -f ~/aistudio-proxy/aistudio-proxy.yaml
+#
+# Đăng nhập lại khi cookie hết hạn: thay auth/main.json, chạy setup-secret.sh, rồi
+#   kubectl -n aistudio exec deploy/aistudio-proxy -- rm /app/auth_profiles/active/main.json
+#   kubectl -n aistudio rollout restart deploy/aistudio-proxy
+apiVersion: v1
+kind: Namespace
+metadata:
+    name: aistudio
+---
+# Giữ cookie đã được proxy tự làm mới (COOKIE_REFRESH_*) qua các lần restart
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+    name: aistudio-profiles
+    namespace: aistudio
+spec:
+    accessModes:
+        - ReadWriteOnce
+    storageClassName: local-path
+    resources:
+        requests:
+            storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: aistudio-proxy
+    namespace: aistudio
+spec:
+    # Một trình duyệt, một phiên đăng nhập: không chạy song song hai pod
+    replicas: 1
+    strategy:
+        type: Recreate
+    selector:
+        matchLabels:
+            app: aistudio-proxy
+    template:
+        metadata:
+            labels:
+                app: aistudio-proxy
+        spec:
+            securityContext:
+                runAsUser: 997
+                runAsGroup: 997
+                fsGroup: 997
+            initContainers:
+                # Chép cookie vào PVC lần đầu (không ghi đè bản đã làm mới), API key thì luôn lấy từ secret
+                - name: seed-auth
+                  image: localhost/aistudio-proxy:044c3db-fix1
+                  imagePullPolicy: Never
+                  command:
+                      - sh
+                      - -c
+                      - |
+                          mkdir -p /profiles/active /profiles/saved
+                          [ -f /profiles/active/main.json ] || cp /secret/main.json /profiles/active/main.json
+                          cp /secret/key.txt /profiles/key.txt
+                  volumeMounts:
+                      - name: profiles
+                        mountPath: /profiles
+                      - name: auth
+                        mountPath: /secret
+                        readOnly: true
+            containers:
+                - name: proxy
+                  image: localhost/aistudio-proxy:044c3db-fix1
+                  imagePullPolicy: Never
+                  env:
+                      # Proxy luồng tích hợp gửi lại request bằng Python và luôn bị Google trả 403: tắt
+                      - name: STREAM_PORT
+                        value: "0"
+                      - name: SERVER_LOG_LEVEL
+                        value: INFO
+                  ports:
+                      - name: http
+                        containerPort: 2048
+                  resources:
+                      requests:
+                          cpu: 250m
+                          memory: 1Gi
+                      limits:
+                          memory: 4Gi
+                  startupProbe:
+                      httpGet:
+                          path: /health
+                          port: http
+                      periodSeconds: 5
+                      failureThreshold: 36
+                  readinessProbe:
+                      httpGet:
+                          path: /health
+                          port: http
+                      periodSeconds: 10
+                      timeoutSeconds: 5
+                  # supervisord tự khởi động lại tiến trình hỏng nên container không tự chết; probe này thay nó
+                  livenessProbe:
+                      httpGet:
+                          path: /health
+                          port: http
+                      periodSeconds: 30
+                      timeoutSeconds: 10
+                      failureThreshold: 4
+                  volumeMounts:
+                      - name: profiles
+                        mountPath: /app/auth_profiles
+                      - name: dshm
+                        mountPath: /dev/shm
+                      # Ảnh chụp lỗi của proxy: giới hạn dung lượng thay vì để phình trong layer container
+                      - name: errors
+                        mountPath: /app/errors_py
+            volumes:
+                - name: profiles
+                  persistentVolumeClaim:
+                      claimName: aistudio-profiles
+                - name: auth
+                  secret:
+                      secretName: aistudio-auth
+                - name: dshm
+                  emptyDir:
+                      medium: Memory
+                      sizeLimit: 1Gi
+                - name: errors
+                  emptyDir:
+                      sizeLimit: 500Mi
+---
+# Trong cluster: http://aistudio-proxy.aistudio.svc.cluster.local:2048/v1
+apiVersion: v1
+kind: Service
+metadata:
+    name: aistudio-proxy
+    namespace: aistudio
+spec:
+    selector:
+        app: aistudio-proxy
+    ports:
+        - name: http
+          port: 2048
+          targetPort: http
