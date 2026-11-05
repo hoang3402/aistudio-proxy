@@ -22,7 +22,7 @@ from typing import Optional
 
 from fastapi import Depends
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from browser_utils.speech import DEFAULT_VOICE, SpeechError, pcm_to_wav, speech_service
@@ -43,6 +43,7 @@ class SpeechRequest(BaseModel):
     input: str
     voice: Optional[str] = None
     response_format: str = "wav"
+    stream_format: Optional[str] = None
     speed: Optional[float] = None
 
 
@@ -66,6 +67,29 @@ async def create_speech(
     if voice and voice.lower() in OPENAI_VOICES:
         voice = None
     await state.processing_lock.acquire()
+    if request.stream_format == "audio":
+        if fmt != "pcm":
+            state.processing_lock.release()
+            return _error(400, 'stream_format "audio" hiện chỉ hỗ trợ response_format "pcm".', "unsupported_stream_format")
+        try:
+            stream = await speech_service.start_stream(page, request.input, voice or DEFAULT_VOICE)
+        except SpeechError as exc:
+            state.processing_lock.release()
+            logger.warning(f"[Speech] {exc.status}: {exc}")
+            return _error(exc.status, str(exc), "speech_failed")
+
+        async def release_lock() -> None:
+            await stream.done
+            if SETTLE_SECONDS > 0:
+                await asyncio.sleep(SETTLE_SECONDS)
+            state.processing_lock.release()
+
+        asyncio.create_task(release_lock())
+        return StreamingResponse(
+            stream.chunks(),
+            media_type=f"audio/L16;rate={stream.rate};channels=1",
+            headers={"X-Audio-Sample-Rate": str(stream.rate), "Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no"},
+        )
     hold = 0.0
     try:
         pcm, rate = await speech_service.synthesize(page, request.input, voice or DEFAULT_VOICE)

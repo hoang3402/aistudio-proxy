@@ -11,13 +11,14 @@ Audio không lấy từ thẻ <audio> mà bắt thẳng phản hồi RPC MakerSu
 
 import asyncio
 import base64
+import codecs
 import json
 import logging
 import random
 import re
 import struct
 import time
-from typing import Any, List, Optional, Tuple
+from typing import Any, AsyncIterator, List, Optional, Tuple, Union
 
 logger = logging.getLogger("AIStudioProxyServer")
 
@@ -31,6 +32,7 @@ MAX_CLICKS = 3
 BASE_TIMEOUT_S = 60
 PER_CHAR_TIMEOUT_S = 0.08
 MAX_INPUT_CHARS = 20000
+_AUDIO_PAIR = re.compile(r'\["(audio/[^"\\]+)"\s*,\s*"([A-Za-z0-9+/=]+)"\]')
 
 
 class SpeechError(Exception):
@@ -64,6 +66,16 @@ def parse_audio(body: bytes) -> Tuple[bytes, int]:
     return b"".join(base64.b64decode(data) for _, data in parts), rate
 
 
+def extract_audio_chunks(buffer: str) -> Tuple[List[Tuple[str, bytes]], str]:
+    """Tách các cặp audio đã đủ khỏi một đoạn JSON còn đang tới; giữ phần cặp cuối bị cắt cho lần sau."""
+    matches = list(_AUDIO_PAIR.finditer(buffer))
+    found = [(match.group(1), base64.b64decode(match.group(2))) for match in matches]
+    if matches:
+        return found, buffer[matches[-1].end() :]
+    marker = buffer.rfind('["audio/')
+    return found, buffer[marker:] if marker >= 0 else buffer[-8:]
+
+
 def pcm_to_wav(pcm: bytes, rate: int = DEFAULT_RATE) -> bytes:
     """Bọc PCM 16-bit mono bằng header WAV (44 byte)."""
     header = b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
@@ -78,6 +90,8 @@ class SpeechService:
         self._context: Any = None
         self._page: Any = None
         self._responses: "asyncio.Queue[Tuple[int, bytes]]" = asyncio.Queue()
+        self._wire_events: Optional["asyncio.Queue[dict]"] = None
+        self._replaying = False
         # Sau mỗi lần có kết quả, nút Run bị khoá cho tới khi sang hộp thoại mới ("New chat")
         self._dirty = False
 
@@ -98,12 +112,89 @@ class SpeechService:
     async def _on_response(self, response: Any) -> None:
         if "GenerateContent" not in response.url:
             return
+        if self._replaying:
+            return
         try:
             body = await response.body()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[Speech] không đọc được phản hồi GenerateContent: {exc}")
             return
         self._responses.put_nowait((response.status, body))
+
+    async def _route_generate(self, route: Any) -> None:
+        """Khi có người nghe stream, chặn request WAA rồi phát lại bằng fetch của browser để đọc body từng chunk."""
+        events = self._wire_events
+        if events is None or self._replaying:
+            await route.continue_()
+            return
+        request = route.request
+        headers = await request.all_headers()
+        allowed = {
+            key: value
+            for key, value in headers.items()
+            if key.lower()
+            in {
+                "accept",
+                "authorization",
+                "content-type",
+                "x-aistudio-g1-tier",
+                "x-aistudio-visit-id",
+                "x-goog-api-key",
+                "x-goog-authuser",
+                "x-goog-ext-519733851-bin",
+                "x-user-agent",
+            }
+        }
+        self._replaying = True
+        await route.abort()
+
+        async def replay() -> None:
+            started = time.monotonic()
+            try:
+                result = await self._page.evaluate(
+                    """async ({url, headers, body}) => {
+                        const started = performance.now();
+                        try {
+                            const response = await fetch(url, {method: "POST", headers, body, credentials: "include"});
+                            const headersMs = Math.round(performance.now() - started);
+                            await window.__butmongSpeechStream({type: "headers", status: response.status, headersMs});
+                            const reader = response.body.getReader();
+                            let chunks = 0;
+                            let total = 0;
+                            let firstChunkMs = null;
+                            for (;;) {
+                                const {value, done} = await reader.read();
+                                if (done) break;
+                                if (firstChunkMs === null) firstChunkMs = Math.round(performance.now() - started);
+                                const copied = new Uint8Array(value.byteLength);
+                                copied.set(value);
+                                let binary = "";
+                                for (let i = 0; i < copied.length; i += 0x8000) binary += String.fromCharCode(...copied.subarray(i, i + 0x8000));
+                                await window.__butmongSpeechStream({type: "chunk", data: btoa(binary)});
+                                chunks += 1;
+                                total += value.byteLength;
+                            }
+                            const stats = {status: response.status, headersMs, firstChunkMs, totalMs: Math.round(performance.now() - started), chunks, bytes: total};
+                            await window.__butmongSpeechStream({type: "done", ...stats});
+                            return stats;
+                        } catch (error) {
+                            await window.__butmongSpeechStream({type: "error", message: String(error)});
+                            throw error;
+                        }
+                    }""",
+                    {"url": request.url, "headers": allowed, "body": request.post_data or ""},
+                )
+                logger.info(
+                    f"[Speech stream] status={result['status']} headers={result['headersMs']}ms first={result['firstChunkMs']}ms "
+                    f"total={result['totalMs']}ms chunks={result['chunks']} bytes={result['bytes']}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[Speech stream] replay lỗi sau {time.monotonic() - started:.1f}s: {exc}")
+                events.put_nowait({"type": "error", "message": str(exc)})
+            finally:
+                self._replaying = False
+
+        asyncio.create_task(replay())
 
     async def _open(self, chat_page: Any) -> None:
         """Mở context + trang speech mới, vào màn soạn "Create new dialog"."""
@@ -114,6 +205,8 @@ class SpeechService:
         self._context = await browser.new_context(storage_state=storage, viewport=viewport)
         self._dirty = False
         page = self._page = await self._context.new_page()
+        await page.expose_binding("__butmongSpeechStream", lambda _source, event: self._wire_events.put_nowait(event) if self._wire_events is not None else None)
+        await page.route("**/*MakerSuiteService/GenerateContent", self._route_generate)
         page.on("response", lambda r: asyncio.ensure_future(self._on_response(r)))
         await page.goto(SPEECH_URL, wait_until="domcontentloaded", timeout=60_000)
         await page.wait_for_timeout(4000)
@@ -200,6 +293,107 @@ class SpeechService:
                 await self.close()
                 raise SpeechError(f"Trang Generate speech lỗi: {exc}") from exc
 
+    async def start_stream(self, chat_page: Any, text: str, voice: str = DEFAULT_VOICE) -> "SpeechStream":
+        """Bắt đầu đọc và chỉ trả khi đã có PCM đầu tiên; producer tiếp tục chạy dù client ngắt."""
+        text = text.strip()
+        if not text:
+            raise SpeechError("Chưa có nội dung để đọc.", 400)
+        if len(text) > MAX_INPUT_CHARS:
+            raise SpeechError(f"Văn bản quá dài ({len(text)} ký tự, tối đa {MAX_INPUT_CHARS}).", 400)
+        stream = SpeechStream()
+        asyncio.create_task(self._produce_stream(stream, chat_page, text, voice))
+        await stream.ready
+        return stream
+
+    async def _produce_stream(self, stream: "SpeechStream", chat_page: Any, text: str, voice: str) -> None:
+        started = time.time()
+        try:
+            async with self._lock:
+                await self._synthesize_stream_locked(stream, chat_page, text, voice)
+        except Exception as exc:  # noqa: BLE001
+            error = exc if isinstance(exc, SpeechError) else SpeechError(f"Trang Generate speech lỗi: {exc}")
+            if not stream.ready.done():
+                stream.ready.set_exception(error)
+            else:
+                await stream.output.put(error)
+            if not isinstance(exc, SpeechError):
+                logger.error(f"[Speech] stream lỗi sau {time.time() - started:.1f}s: {exc}")
+                await self.close()
+        finally:
+            await stream.output.put(None)
+            if not stream.done.done():
+                stream.done.set_result(None)
+
+    async def _synthesize_stream_locked(self, stream: "SpeechStream", chat_page: Any, text: str, voice: str) -> None:
+        page = await self._ensure_page(chat_page)
+        if self._dirty:
+            await self._new_dialog(page)
+        await self._ensure_voice(page, voice)
+        textarea = page.locator('textarea[aria-label="Speech block text"]').first
+        await textarea.click()
+        await page.keyboard.press("Control+A")
+        await textarea.fill(text)
+        await page.keyboard.type(" ", delay=30)
+        await page.keyboard.press("Backspace")
+        timeout = BASE_TIMEOUT_S + PER_CHAR_TIMEOUT_S * len(text)
+        last_status = 0
+        for attempt in range(1, MAX_CLICKS + 1):
+            await page.wait_for_timeout(5000 if attempt == 1 else 4000)
+            events: "asyncio.Queue[dict]" = asyncio.Queue()
+            self._wire_events = events
+            began = time.time()
+            await self._click_run(page)
+            decoder = codecs.getincrementaldecoder("utf-8")()
+            buffer = ""
+            status = 0
+            audio_bytes = 0
+            error_sample = bytearray()
+            try:
+                while True:
+                    event = await asyncio.wait_for(events.get(), timeout=timeout)
+                    kind = event.get("type")
+                    if kind == "headers":
+                        status = int(event.get("status", 0))
+                    elif kind == "chunk":
+                        raw = base64.b64decode(event.get("data", ""))
+                        if len(error_sample) < 1000:
+                            error_sample.extend(raw[: 1000 - len(error_sample)])
+                        buffer += decoder.decode(raw)
+                        chunks, buffer = extract_audio_chunks(buffer)
+                        for mime, pcm in chunks:
+                            match = re.search(r"rate=(\d+)", mime)
+                            stream.rate = int(match.group(1)) if match else DEFAULT_RATE
+                            audio_bytes += len(pcm)
+                            await stream.output.put(pcm)
+                            if not stream.ready.done():
+                                stream.ready.set_result(None)
+                    elif kind == "done":
+                        buffer += decoder.decode(b"", final=True)
+                        chunks, _ = extract_audio_chunks(buffer)
+                        for mime, pcm in chunks:
+                            match = re.search(r"rate=(\d+)", mime)
+                            stream.rate = int(match.group(1)) if match else DEFAULT_RATE
+                            audio_bytes += len(pcm)
+                            await stream.output.put(pcm)
+                            if not stream.ready.done():
+                                stream.ready.set_result(None)
+                        break
+                    elif kind == "error":
+                        raise SpeechError(f"Browser không phát lại được request audio: {event.get('message', 'không rõ lỗi')}")
+            except asyncio.TimeoutError as exc:
+                await self.close()
+                raise SpeechError(f"AI Studio không trả audio sau {timeout:.0f} giây.", 504) from exc
+            finally:
+                self._wire_events = None
+            last_status = status
+            if status == 200 and audio_bytes:
+                logger.info(f"[Speech] stream {len(text)} ký tự -> {audio_bytes / (stream.rate * 2):.1f}s audio sau {time.time() - began:.1f}s (lần bấm {attempt})")
+                self._dirty = True
+                return
+            logger.warning(f"[Speech] stream lần bấm {attempt}: HTTP {status} {bytes(error_sample[:80])!r}")
+        await self.close()
+        raise SpeechError(f"AI Studio từ chối {MAX_CLICKS} lần bấm Run liên tiếp (HTTP {last_status}).", 502)
+
     async def _synthesize_locked(self, chat_page: Any, text: str, voice: str) -> Tuple[bytes, int]:
         page = await self._ensure_page(chat_page)
         if self._dirty:
@@ -235,6 +429,24 @@ class SpeechService:
         # Mỗi lần mở trang mới BotGuard lại chấm lại từ đầu: bỏ trang để lần sau thử lại từ trạng thái sạch
         await self.close()
         raise SpeechError(f"AI Studio từ chối {MAX_CLICKS} lần bấm Run liên tiếp (HTTP {last_status}).", 502)
+
+
+class SpeechStream:
+    def __init__(self) -> None:
+        loop = asyncio.get_running_loop()
+        self.output: "asyncio.Queue[Union[bytes, Exception, None]]" = asyncio.Queue()
+        self.ready: "asyncio.Future[None]" = loop.create_future()
+        self.done: "asyncio.Future[None]" = loop.create_future()
+        self.rate = DEFAULT_RATE
+
+    async def chunks(self) -> AsyncIterator[bytes]:
+        while True:
+            item = await self.output.get()
+            if item is None:
+                return
+            if isinstance(item, Exception):
+                raise item
+            yield item
 
 
 speech_service = SpeechService()

@@ -30,6 +30,7 @@ CLIProxyAPI gọi tới như nhà cung cấp `openai-compatibility` tên `aistud
 - Bỏ qua temperature và top_p khi model không còn thanh trượt (Gemini 3.x).
 - Bắt buộc `STREAM_PORT=0`: proxy luồng MITM tích hợp luôn nhận 403 từ Google.
 - **Generate speech** (`fix2`): thêm `POST /v1/audio/speech`, xem mục dưới.
+- **Streaming speech** (`stream1`): phát lại request đã có WAA bằng chính browser rồi chuyển từng PCM chunk tới client.
 
 ## Dựng lại từ đầu
 
@@ -39,8 +40,8 @@ Image nền `localhost/aistudio-proxy:044c3db` **không nằm trong repo** (6 GB
 git clone https://github.com/CJackHwang/AIstudioProxyAPI.git
 cd AIstudioProxyAPI && git checkout 044c3db
 podman build -f docker/Dockerfile -t localhost/aistudio-proxy:044c3db .   # context là gốc repo upstream
-cd - && podman build -t localhost/aistudio-proxy:044c3db-fix4 .            # image vá của repo này
-podman save localhost/aistudio-proxy:044c3db-fix4 | sudo k3s ctr images import -
+cd - && podman build -t localhost/aistudio-proxy:044c3db-stream1 .         # image vá của repo này
+podman save localhost/aistudio-proxy:044c3db-stream1 | sudo k3s ctr images import -
 ```
 
 ## Bí mật (không có trong repo)
@@ -69,7 +70,7 @@ theo khuôn OpenAI để client OpenAI dùng được. Gọi thẳng vào Servic
 ```sh
 curl -sS http://aistudio-proxy.aistudio.svc.cluster.local:2048/v1/audio/speech \
   -H "Authorization: Bearer $(cat auth/key.txt)" -H 'Content-Type: application/json' \
-  -d '{"input":"Xin chào, đây là thử giọng đọc.","voice":"Lumi","response_format":"wav"}' -o out.wav
+  -d '{"input":"Xin chào, đây là thử giọng đọc.","voice":"Lumi","response_format":"pcm","stream_format":"audio"}' -o out.pcm
 ```
 
 | Tham số | Ghi chú |
@@ -77,6 +78,7 @@ curl -sS http://aistudio-proxy.aistudio.svc.cluster.local:2048/v1/audio/speech \
 | `input` | tối đa 20.000 ký tự; đã thử 3.593 ký tự (≈ 4 phút audio) |
 | `voice` | tên giọng của AI Studio (vd `Lumi`, `Fola`); trống hoặc tên giọng OpenAI (`alloy`…) thì dùng `Fola`; không có giọng đó thì 400 |
 | `response_format` | `wav` (mặc định) hoặc `pcm` (16-bit little-endian mono 24 kHz). Không có mp3/opus vì image không có bộ mã hoá |
+| `stream_format` | `audio` + `response_format: "pcm"` trả PCM bằng chunked transfer ngay khi Google sinh; bỏ trống giữ response hoàn chỉnh tương thích cũ |
 | `model`, `speed` | bị bỏ qua |
 
 Header trả về: `X-Audio-Seconds`, `X-Audio-Sample-Rate`.
@@ -85,6 +87,7 @@ Header trả về: `X-Audio-Seconds`, `X-Audio-Sample-Rate`.
 
 - Một trang riêng trong **context riêng** của cùng trình duyệt (tách localStorage khỏi trang chat), mở lười ở yêu cầu đầu rồi giữ mở (yêu cầu đầu tốn thêm ~15 giây). Trang đang mở nhưng rảnh thì không ảnh hưởng chat.
 - Audio không lấy từ thẻ `<audio>` mà bắt phản hồi RPC `MakerSuiteService/GenerateContent`: JSON lồng nhau, mỗi đoạn là `["audio/l16; rate=24000; channels=1", "<base64>"]`; ghép các đoạn (khoảng 80 đoạn cho câu ngắn) thành PCM little-endian.
+- Chế độ stream chặn request trước khi gửi, rồi phát lại nguyên body và header bằng `fetch` của chính trang. Nhờ vậy WAA proof chỉ dùng một lần và request vẫn mang TLS/fingerprint của Camoufox. Mỗi cặp audio hoàn chỉnh được giải mã và chuyển tới client ngay; producer tiếp tục chạy nếu client ngắt.
 - Bấm Run phải giống người thật (di chuột tới nút rồi nhấn thả, sau vài giây trang mở): bấm thẳng thì Google trả 403 "The caller does not have permission" (BotGuard). Đo được 10 trên 11 lần đầu thành công, nên có thử lại tối đa 3 lần bấm.
 - Sau mỗi kết quả nút Run bị khoá (`aria-disabled`); Pause không mở lại được. Phải bấm **New chat** để sang hộp thoại mới trước lần đọc kế.
 - Mỗi yêu cầu có chi phí cố định cỡ 10 giây (sang hộp thoại mới, chọn giọng, chờ trước khi bấm).
@@ -94,6 +97,8 @@ Header trả về: `X-Audio-Seconds`, `X-Audio-Sample-Rate`.
 | 30 ký tự | 2,5 giây | 2,3 đến 3,3 giây |
 | 466 ký tự | 31 giây | 9,5 giây |
 | 3.593 ký tự | 247 giây | 53,5 giây |
+
+Đo stream ngày 5/11/2026: 549 ký tự tạo 31,1 giây audio; PCM đầu tới browser fetch sau khoảng 2,0 giây tính từ lúc bấm Run, toàn bộ xong sau 12,8 giây. Tính cả thao tác New chat/chờ BotGuard, client nhận chunk đầu khoảng 10 giây khi trang speech đã ấm; nếu lần đầu mở trang hoặc BotGuard trả 403 rồi retry thì khoảng 20 giây.
 
 ### Giới hạn
 
